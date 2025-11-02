@@ -132,6 +132,15 @@ public class Memory {
     public int[] getMemoryArray() {
         return mem;
     }
+    
+    /**
+     * Gets the array of memory mapped devices.
+     * 
+     * @return The array of memory mapped devices.
+     */
+    public MemoryMappedChip[] getMemoryMap() {
+        return memoryMap;
+    }
 
     /**
      * Reads the value of the given Attack UFO memory address.

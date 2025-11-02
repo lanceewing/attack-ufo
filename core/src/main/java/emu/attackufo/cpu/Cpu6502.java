@@ -1,5 +1,9 @@
 package emu.attackufo.cpu;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.Callable;
+
 import emu.attackufo.BaseChip;
 
 /**
@@ -129,19 +133,19 @@ public class Cpu6502 extends BaseChip {
   private static final int FETCH_DIS_SP       = 41;
   private static final int FETCH_IAH_PC       = 42;
   private static final int FETCH_IAL_PC       = 43;
-  private static final int FETCH_P_SP         = 44;
-  private static final int FETCH_PCH_SP       = 45;
-  private static final int FETCH_PCL_SP       = 46;
+  private static final int FETCH_INC_PC       = 44;  // Fetch using PC and then does increment PC.
+  private static final int FETCH_P_SP         = 45;
+  private static final int FETCH_PCH_SP       = 46;
+  private static final int FETCH_PCL_SP       = 47;
 
-  private static final int STORE_DATA_ADL     = 47;
-  private static final int STORE_DATA_BA      = 48;
-  private static final int STORE_DATA_BAL     = 49;
-  private static final int STORE_DATA_EA      = 50;
-  private static final int STORE_DATA_SP      = 51;
-  private static final int STORE_P_SP         = 52;
-  private static final int STORE_PCH_SP       = 53;
-  private static final int STORE_PCL_SP       = 54;
-
+  private static final int STORE_DATA_ADL     = 48;
+  private static final int STORE_DATA_BA      = 49;
+  private static final int STORE_DATA_BAL     = 50;
+  private static final int STORE_DATA_EA      = 51;
+  private static final int STORE_DATA_SP      = 52;
+  private static final int STORE_P_SP         = 53;
+  private static final int STORE_PCH_SP       = 54;
+  private static final int STORE_PCL_SP       = 55;
 
   /**
    * This static lookup table holds the decoding details of all of the 6502's
@@ -151,7 +155,7 @@ public class Cpu6502 extends BaseChip {
    * the action to take for a particular cycle. T0 is always the fetch.
    */
   private static int INSTRUCTION_DECODE_MATRIX[][] = {
-    {BRK, FETCH_DIS_PC, STORE_PCH_SP, STORE_PCL_SP, STORE_P_SP, FETCH_ADL_FFFE, FETCH_ADH_FFFF, EXECUTE_LAST}, // BRK
+    {BRK, FETCH_INC_PC, STORE_PCH_SP, STORE_PCL_SP, STORE_P_SP, FETCH_ADL_FFFE, FETCH_ADH_FFFF, EXECUTE_LAST}, // BRK
     {ORA, FETCH_BAL_PC, FETCH_DIS_BAL_X, FETCH_ADL_BAL, FETCH_ADH_BAL, FETCH_DATA_EA, EXECUTE_LAST}, // ORA - (Indirect, X)
     {}, // -
     {}, // -
@@ -501,10 +505,9 @@ public class Cpu6502 extends BaseChip {
    */
   private int processorStatusRegister;
 
-  // The individual flag values.
+  // The individual flag values. There are only 6 flags that physically exist. B flag does not (only on the stack).
   private boolean negativeResultFlag;
   private boolean overflowFlag;
-  private boolean breakCommandFlag;
   private boolean decimalModeFlag;
   private boolean interruptDisableFlag;
   private boolean zeroResultFlag;
@@ -580,7 +583,7 @@ public class Cpu6502 extends BaseChip {
    * The address to branch to for a branch instruction.
    */
   private int branchAddress;
-
+  
   /**
    * Constructor for CPU6502.
    */
@@ -629,7 +632,7 @@ public class Cpu6502 extends BaseChip {
    * @param address the address of the word to get.
    */
   private int getWordFromMemory(int address) {
-    return (mem[address] | ((mem[address + 1] << 8) & 0xFF00));
+    return (memoryMap[address].readMemory(address) | ((memoryMap[address + 1].readMemory(address + 1) << 8) & 0xFF00));
   }
 
   /**
@@ -667,7 +670,6 @@ public class Cpu6502 extends BaseChip {
     processorStatusRegister =
       (negativeResultFlag ? 0x80 : 0) |
       (overflowFlag ? 0x40 : 0) | 0x20 |
-      (breakCommandFlag ? 0x10 : 0) |
       (decimalModeFlag ? 8 : 0) |
       (interruptDisableFlag ? 4 : 0) |
       (zeroResultFlag ? 2 : 0) |
@@ -680,7 +682,6 @@ public class Cpu6502 extends BaseChip {
   private void unpackPSR() {
     negativeResultFlag = ((processorStatusRegister & 0x80) != 0);
     overflowFlag = ((processorStatusRegister & 0x40) != 0);
-    breakCommandFlag = ((processorStatusRegister & 0x10) != 0);
     decimalModeFlag = ((processorStatusRegister & 0x08) != 0);
     interruptDisableFlag = ((processorStatusRegister & 0x04) != 0);
     zeroResultFlag = ((processorStatusRegister & 0x02) != 0);
@@ -704,7 +705,7 @@ public class Cpu6502 extends BaseChip {
   public void clearInterrupt(int irqSignalCode) {
     this.interruptStatus &= ~irqSignalCode;
   }
-
+  
   /**
    * Executes the current instruction, using the data just loaded if applicable.
    * Input data is contained in the inputDataLatch instance variable, and data
@@ -716,19 +717,20 @@ public class Cpu6502 extends BaseChip {
     
     switch(instructionSteps[0]) {
       case ADC:
-        // TODO: I'm not convinced ADC is 100% correct. There are bugs in some games that point in this direction.
         op1 = accumulator;
         op2 = inputDataLatch;
         if (decimalModeFlag) {
-          zeroResultFlag = ((op1 + op2 + (carryFlag ? 1 : 0)) & 0xFF) == 0;
-          tmp = (op1 & 0x0F) + (op2 & 0x0F) + (carryFlag ? 1 : 0);
-          accumulator   = tmp < 0x0A ? tmp : tmp + 6;
-          tmp = (op1 & 0xF0) + (op2 & 0xF0) + (tmp & 0xF0);
-          negativeResultFlag = ((byte)tmp) < 0;
-          overflowFlag = ((op1 ^ tmp) & ~(op1 ^ op2) & 0x80) != 0;
-          tmp = (accumulator & 0x0F) | (tmp < 0xA0 ? tmp : tmp + 0x60);
-          carryFlag = (tmp >= 0x100);
-          accumulator = tmp & 0xFF;
+          int lo, hi;
+          lo = (op1 & 0x0f) + (op2 & 0x0f) + (carryFlag ? 1 : 0);
+          if ((lo & 0xff) > 9) lo += 6;
+          hi = (op1 >> 4) + (op2 >> 4) + (lo > 15 ? 1 : 0);
+          if ((hi & 0xff) > 9) hi += 6;
+          tmp = (hi << 4) | (lo & 0x0f);
+          accumulator = tmp & 0xff;
+          carryFlag = (hi > 15);
+          zeroResultFlag = (accumulator == 0);
+          overflowFlag = false;       // BCD never sets overflow flag
+          negativeResultFlag = false; // BCD is never negative on NMOS 6502
         }
         else {       // binary mode
           tmp = op1 + op2 + (carryFlag ? 1 : 0);
@@ -790,7 +792,6 @@ public class Cpu6502 extends BaseChip {
 
       case BRK:
         interruptDisableFlag = true;
-        breakCommandFlag = true;
         programCounter = (effectiveAddressHigh | effectiveAddressLow);
         break;
 
@@ -905,8 +906,9 @@ public class Cpu6502 extends BaseChip {
         break;
 
       case PHP:
+        // PHP pushes with B flag bit set, just like BRK does. Note B flag does not physically exist in PSR.
         packPSR();
-        dataBusBuffer = processorStatusRegister;
+        dataBusBuffer = processorStatusRegister | 0x10;
         break;
 
       case PLA:
@@ -942,17 +944,20 @@ public class Cpu6502 extends BaseChip {
         break;
 
       case SBC:
-        // TODO: Also not convinced SBC is 100% correct.
         op1 = accumulator;
         op2 = inputDataLatch;
         if (decimalModeFlag) {
-          tmp = (op1 & 0x0F) - (op2 & 0x0F) - (carryFlag ? 0 : 1);
-          accumulator = (tmp & 0x10) == 0 ? tmp : tmp - 6;
-          tmp = (op1 & 0xF0) - (op2 & 0xF0) - (accumulator & 0x10);
-          accumulator = (accumulator & 0x0F) | ((tmp & 0x100)==0 ? tmp : tmp - 0x60);
-          tmp = op1 - op2 - (carryFlag ? 0 : 1);
-          setFlagBorrow(tmp);
-          setNZ(tmp);
+          int lo, hi;
+          lo = (op1 & 0x0F) - (op2 & 0x0F) - (carryFlag ? 0 : 1);
+          if ((lo & 0x10) != 0) lo -= 6;
+          hi = (op1 >> 4) - (op2 >> 4) - ((lo & 0x10) != 0 ? 1 : 0);
+          if ((hi & 0x10) != 0) hi -= 6;
+          tmp = (hi << 4) | (lo & 0x0F);
+          accumulator = tmp & 0xFF;
+          carryFlag = ((hi & 0xFF) < 15);
+          zeroResultFlag = (accumulator == 0);
+          overflowFlag = false;       // BCD never sets overflow flag
+          negativeResultFlag = false; // BCD is never negative on NMOS 6502
           
         } else {  // binary mode
           tmp = op1 - op2 - (carryFlag ? 0 : 1);
@@ -1046,31 +1051,55 @@ public class Cpu6502 extends BaseChip {
 
       /* These are not instructions but this engine treats them as such */
       case NMI:
-         programCounter = (effectiveAddressHigh | effectiveAddressLow);
-         // NMI signals occur on the negative transition only, so we need to reset.
-         interruptStatus &= ~S_NMI;
-         break;
+        interruptDisableFlag = true;
+        programCounter = (effectiveAddressHigh | effectiveAddressLow);
+        // NMI signals occur on the negative transition only, so we need to reset.
+        interruptStatus &= ~S_NMI;
+        break;
 
       case IRQ:
-         // This flag should be set 3 cycles ago, but it shouldn't matter too much.
-         interruptDisableFlag = true;
-         programCounter = (effectiveAddressHigh | effectiveAddressLow);
-         // IRQ signals occur on a low level, so it is the responsibility of
-         // the external hardware device to reset it.
-         break;
-
+        // This flag should be set 3 cycles ago, but it shouldn't matter too much, because its
+        // only checked on instruction completion, so setting it partway through IRQ steps is fine.
+        interruptDisableFlag = true;
+        programCounter = (effectiveAddressHigh | effectiveAddressLow);
+        // IRQ signals occur on a low level, so it is the responsibility of
+        // the external hardware device to reset it.
+        break;
+         
       default: // Unknown instruction.
         break;
     }
   }
-
+  
+  /**
+   * Steps through a single instruction. Used mainly for unit tests and debugging CPU.
+   */
+  public void step() {
+    // Keep emulating cycles until the instruction changes.
+    do {
+      emulateCycle();
+    } while (currentInstructionStep > 1);
+  }
+  
+  /**
+   * Steps through the given number of instructions. Used mainly for unit tsts and
+   * debugging the CPU.
+   * 
+   * @param numberOfInstructions The number of instructions to step.
+   */
+  public void step(int numberOfInstructions) {
+    for (int i=0; i<numberOfInstructions; i++) {
+      step();
+    }
+  }
+  
   /**
    * Emulates a machine cycle. There should be exactly one read or one write
    * per cycle, even in scenarios where the fetched data is discarded.
    */
   public void emulateCycle() {
     int action = 0;
-
+    
     if (currentInstructionStep < numOfInstructionSteps) {
       // Get the action for the current cycle of the instruction.
       action = instructionSteps[currentInstructionStep];
@@ -1082,6 +1111,7 @@ public class Cpu6502 extends BaseChip {
           inputDataLatch = ((inputDataLatch & 0x80) == 0? inputDataLatch : inputDataLatch - 0x100);
           branchAddress = ((programCounter + inputDataLatch) & 0xFFFF);
           if ((programCounter & 0xFF00) == (branchAddress & 0xFF00)) {
+            // Destination address within same page, so skip next instruction step.
             programCounter = branchAddress;
             currentInstructionStep++;
           }
@@ -1094,10 +1124,11 @@ public class Cpu6502 extends BaseChip {
 
         case EXECUTE_BRANCH:
           // Fetch offset
-          inputDataLatch = mem[programCounter++];
+          inputDataLatch = memoryMap[programCounter].readMemory(programCounter);
+          programCounter++;
           // Execute the branch test.
           executeInstruction();
-          // Skip next two cycles if branch is not taken.
+          // Skip next two instruction steps if branch is not taken.
           if (!branchFlag) {
             currentInstructionStep += 2;
           }
@@ -1114,11 +1145,9 @@ public class Cpu6502 extends BaseChip {
           // Fetch next op code.
           currentInstructionStep = 0;
           if ((interruptStatus == 0) || (((interruptStatus & S_NMI) == 0) && interruptDisableFlag)) {
-            if (debug) {
-              displayCurrentInstruction();
-            }
             // No interrupts, so proceed to next instruction.
-            instructionRegister = mem[programCounter++];
+            instructionRegister = memoryMap[programCounter].readMemory(programCounter);
+            programCounter++;
             instructionSteps = INSTRUCTION_DECODE_MATRIX[instructionRegister];
           }
           else {
@@ -1183,21 +1212,23 @@ public class Cpu6502 extends BaseChip {
           break;
 
         case FETCH_ADH_FFFB:
-          effectiveAddressHigh = (mem[0x3FFB] << 8);
+          effectiveAddressHigh = (memoryMap[0x3FFB].readMemory(0x3FFB) << 8);
           break;
 
         case FETCH_ADH_FFFF:
-          effectiveAddressHigh = (mem[0x3FFF] << 8);
+          effectiveAddressHigh = (memoryMap[0x3FFF].readMemory(0x3FFF) << 8);
           break;
 
         case FETCH_ADH_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          effectiveAddressHigh = (mem[programCounter++] << 8);
+          effectiveAddressHigh = (memoryMap[programCounter].readMemory(programCounter) << 8);
+          programCounter++;
           break;
 
         case FETCH_ADH_IA:
           // Only used by JMP, so not likely to have IO address involved.
-          effectiveAddressHigh = (mem[indirectAddressHigh | indirectAddressLow] << 8);
+          int indirectAddress = indirectAddressHigh | indirectAddressLow;
+          effectiveAddressHigh = (memoryMap[indirectAddress].readMemory(indirectAddress) << 8);
           break;
 
         case FETCH_ADL_BAL:
@@ -1207,21 +1238,23 @@ public class Cpu6502 extends BaseChip {
           break;
 
         case FETCH_ADL_FFFA:
-          effectiveAddressLow = mem[0x3FFA];
+          effectiveAddressLow = memoryMap[0x3FFA].readMemory(0x3FFA);
           break;
 
         case FETCH_ADL_FFFE:
-          effectiveAddressLow = mem[0x3FFE];
+          effectiveAddressLow = memoryMap[0x3FFE].readMemory(0x3FFE);
           break;
 
         case FETCH_ADL_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          effectiveAddressLow = mem[programCounter++];
+          effectiveAddressLow = memoryMap[programCounter].readMemory(programCounter);
+          programCounter++;
           break;
 
         case FETCH_ADL_IA:
           // Only used by JMP, so not likely to have IO address involved.
-          effectiveAddressLow = mem[indirectAddressHigh | indirectAddressLow];
+          indirectAddress = indirectAddressHigh | indirectAddressLow;
+          effectiveAddressLow = memoryMap[indirectAddress].readMemory(indirectAddress);
           indirectAddressLow = ((indirectAddressLow + 1) & 0xFF); // Well known NMOS 6502 bug
           break;
 
@@ -1232,7 +1265,8 @@ public class Cpu6502 extends BaseChip {
 
         case FETCH_BAH_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          baseAddressHigh = (mem[programCounter++] << 8);
+          baseAddressHigh = (memoryMap[programCounter].readMemory(programCounter) << 8);
+          programCounter++;
           break;
 
         case FETCH_BAL_IAL:             // Increments IAL by 1 aswell (& 0xFF??)
@@ -1243,7 +1277,8 @@ public class Cpu6502 extends BaseChip {
 
         case FETCH_BAL_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          baseAddressLow = mem[programCounter++];
+          baseAddressLow = memoryMap[programCounter].readMemory(programCounter);
+          programCounter++;
           break;
 
         case FETCH_DATA_ADL:
@@ -1266,6 +1301,7 @@ public class Cpu6502 extends BaseChip {
           else {
             // Page boundary not crossed, so the data is okay.
             inputDataLatch = memory.readMemory(baseAddressHigh | baseAddressLow);
+            // Skip next step in instruction because it isn't needed.
             currentInstructionStep++;
           }
           break;
@@ -1281,6 +1317,7 @@ public class Cpu6502 extends BaseChip {
           else {
             // Page boundary not crossed, so the data is okay.
             inputDataLatch = memory.readMemory(baseAddressHigh | baseAddressLow);
+            // Skip next step in instruction because it isn't needed.
             currentInstructionStep++;
           }
           break;
@@ -1296,7 +1333,8 @@ public class Cpu6502 extends BaseChip {
 
         case FETCH_DATA_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          inputDataLatch = mem[programCounter++];
+          inputDataLatch = memoryMap[programCounter].readMemory(programCounter);
+          programCounter++;
           break;
 
         case FETCH_DATA_SP:
@@ -1342,7 +1380,9 @@ public class Cpu6502 extends BaseChip {
           break;
 
         case FETCH_DIS_PC:              // Fetches using PC but doesn't increment PC.
-          // Program counter is highly unlikely to be pointing at I/O (BRK, PLA, PLP. RTS, RTI)
+          // Program counter is highly unlikely to be pointing at I/O (PLA, PLP. RTS, RTI, IRQ, NMI)
+          // TODO: Apparently it does fetch data using PC, but having this here affects the sound. ?!
+          //memoryMap[programCounter].readMemory(programCounter);
           break;
 
         case FETCH_DIS_SP:
@@ -1351,21 +1391,29 @@ public class Cpu6502 extends BaseChip {
 
         case FETCH_IAH_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          indirectAddressHigh = (mem[programCounter++] << 8);
+          indirectAddressHigh = (memoryMap[programCounter].readMemory(programCounter) << 8);
+          programCounter++;
           break;
 
         case FETCH_IAL_PC:
           // Program counter is highly unlikely to be pointing at I/O
-          indirectAddressLow = mem[programCounter++];
+          indirectAddressLow = memoryMap[programCounter].readMemory(programCounter);
+          programCounter++;
           break;
-
+          
+        case FETCH_INC_PC:
+          // Fetch using PC, discard data, then increment PC.
+          memoryMap[programCounter].readMemory(programCounter);
+          programCounter++;
+          break;
+          
         case FETCH_P_SP:
           // No I/O in the stack page (RTI)
           stackPointer = ((stackPointer + 1) & 0xFF);
           processorStatusRegister = mem[stackPointer + 0x100];
           unpackPSR();
           break;
-
+          
         case FETCH_PCH_SP:
           // No I/O in the stack page (RTS, RTI)
           stackPointer = ((stackPointer + 1) & 0xFF);
@@ -1408,7 +1456,7 @@ public class Cpu6502 extends BaseChip {
         case STORE_P_SP:
           // No I/O in the stack page (BRK)
           packPSR();
-          mem[stackPointer + 0x100] = processorStatusRegister;
+          mem[stackPointer + 0x100] = (processorStatusRegister | (instructionRegister == 0? 0x10 : 0)); // BRK flag only exists on stack.
           stackPointer = ((stackPointer - 1) & 0xFF);
           break;
 
@@ -1436,16 +1484,13 @@ public class Cpu6502 extends BaseChip {
       currentInstructionStep = 1;
 
       if ((interruptStatus == 0) || (((interruptStatus & S_NMI) == 0) && interruptDisableFlag)) {
-        if (debug) {
-          displayCurrentInstruction();
-        }
         // No interrupts, so proceed to next instruction.
-        instructionRegister = mem[programCounter++];
+        instructionRegister = memoryMap[programCounter].readMemory(programCounter);
+        programCounter++;
         instructionSteps = INSTRUCTION_DECODE_MATRIX[instructionRegister];
       }
       else {
         // An interrupt occurred.
-        // TODO: Needs to check interrupt disabled flag!! (and also for EXECUTE_LAST)
         instructionSteps = ((interruptStatus & S_NMI) == 0? IRQ_STEPS : NMI_STEPS);
       }
 
@@ -1528,142 +1573,6 @@ public class Cpu6502 extends BaseChip {
     48,Il, 43,Ay, No,No, No,No, No,No, 43,Ax, 26,Ax, No,No
   };
   
- 
-  /**
-   * Displays the instruction currently pointed to by the program counter.
-   */
-  public void displayCurrentInstruction() {
-    int start = 0;
-    int insNum = 0;
-    int offset = 0, to = 0;;
-
-    start = programCounter;
-    insNum = (mem[start] << 1);
-
-    StringBuffer insBuf = new StringBuffer();
-    insBuf.append(getRegisterStatus());
-    insBuf.append("\n");
-    insBuf.append(Integer.toHexString(start));
-    insBuf.append(":    ");
-    insBuf.append(instructionNames[instructionInfo[insNum]]);
-    insBuf.append(" ");
-
-    switch(instructionInfo[insNum + 1]) {
-      case Ac: insBuf.append("A"); break;
-      case Il: break;
-
-      case Rl:
-        offset = mem[start+1];
-        to = programCounter + 2 + ((offset < 0x80)? offset : (offset - 0x100));
-        insBuf.append("$"); insBuf.append(Integer.toHexString(to));
-        break;
-
-      case Im: insBuf.append("#$"); insBuf.append(addLeadingZeroes(Integer.toHexString(mem[start+1]), 2)); break;
-      case Zp: insBuf.append("$"); insBuf.append(addLeadingZeroes(Integer.toHexString(mem[start+1]), 2)); break;
-      case Zx: insBuf.append("$"); insBuf.append(addLeadingZeroes(Integer.toHexString(mem[start+1]), 2)); insBuf.append(",x"); break;
-      case Zy: insBuf.append("$"); insBuf.append(addLeadingZeroes(Integer.toHexString(mem[start+1]), 2)); insBuf.append(",y"); break;
-      case Ix: insBuf.append("($"); insBuf.append(addLeadingZeroes(Integer.toHexString(mem[start+1]), 2)); insBuf.append(",x)"); break;
-      case Iy: insBuf.append("($"); insBuf.append(addLeadingZeroes(Integer.toHexString(mem[start+1]), 2)); insBuf.append("),y"); break;
-
-      case Ab: insBuf.append("$"); insBuf.append(addLeadingZeroes(Integer.toHexString((mem[start+2] << 8) + mem[start+1]), 4)); break;
-      case Ax: insBuf.append("$"); insBuf.append(addLeadingZeroes(Integer.toHexString((mem[start+2] << 8) + mem[start+1]), 4)); insBuf.append(",x"); break;
-      case Ay: insBuf.append("$"); insBuf.append(addLeadingZeroes(Integer.toHexString((mem[start+2] << 8) + mem[start+1]), 4)); insBuf.append(",y"); break;
-      case In: insBuf.append("($"); insBuf.append(addLeadingZeroes(Integer.toHexString((mem[start+2] << 8) + mem[start+1]), 4)); insBuf.append(")"); break;
-
-      default: insBuf.append(".db $"); insBuf.append(Integer.toHexString(insNum >> 1)); insBuf.append("; <Invalid OPcode>");
-    }
-
-    System.out.println(insBuf.toString());
-  }
-
-  /**
-   * Returns a string containing the current status of the internal registers.
-   *
-   * @return a string containing the current status of the internal registers.
-   */
-  public String getRegisterStatus() {
-    StringBuffer regBuf = new StringBuffer();
-
-    regBuf.append("PC=");
-    regBuf.append(addLeadingZeroes(Integer.toHexString(programCounter), 4));
-    regBuf.append(",A=");
-    regBuf.append(addLeadingZeroes(Integer.toHexString(accumulator), 2));
-    regBuf.append(",X=");
-    regBuf.append(addLeadingZeroes(Integer.toHexString(indexRegisterX), 2));
-    regBuf.append(",Y=");
-    regBuf.append(addLeadingZeroes(Integer.toHexString(indexRegisterY), 2));
-    regBuf.append(",S=");
-    regBuf.append(addLeadingZeroes(Integer.toHexString(stackPointer), 2));
-    regBuf.append(",P=");
-    regBuf.append(getFlagStatus());
-    regBuf.append(",stack=[");
-    regBuf.append(getStackContents());
-    regBuf.append("] ");
-
-    return (regBuf.toString());
-  }
-
-  /**
-   * Returns a string containing the current status of the internal processor
-   * status register flags.
-   *
-   * @return the current state of the CPU flags.
-   */
-  public String getFlagStatus() {
-    StringBuffer flagBuf = new StringBuffer();
-
-    flagBuf.append(negativeResultFlag? "N" : "-");
-    flagBuf.append(overflowFlag? "O" : "-");
-    flagBuf.append("E");
-    flagBuf.append(breakCommandFlag? "B" : "-");
-    flagBuf.append(decimalModeFlag? "D" : "-");
-    flagBuf.append(interruptDisableFlag? "I" : "-");
-    flagBuf.append(zeroResultFlag? "Z" : "-");
-    flagBuf.append(carryFlag? "C" : "-");
-
-    return (flagBuf.toString());
-  }
-
-  /**
-   * Returns a string containing the current contents of the stack starting
-   * from 0xFF down to the current value of stackPointer.
-   *
-   * @return the current contents of the stack.
-   */
-  public String getStackContents() {
-    StringBuffer stackBuf = new StringBuffer();
-
-    for (int i=0xFF; i>stackPointer; i--) {
-      if (i < 0xFF) {
-        stackBuf.append(",");
-      }
-      stackBuf.append(addLeadingZeroes(Integer.toHexString(mem[i + 0x0100]), 2));
-    }
-
-    return (stackBuf.toString());
-  }
-
-  /**
-   * Pads the given string with leading '0' characters until it reaches the
-   * desired width.
-   *
-   * @param str the string to add the leading zeroes to.
-   * @param desiredWidth the desired width of the final string.
-   *
-   * @return the string with the leading '0' characters added.
-   */
-  private static String addLeadingZeroes(String str, int desiredWidth) {
-    StringBuffer buf = new StringBuffer();
-    int numToAdd = desiredWidth - str.length();
-
-    for (int i=0; i<numToAdd; i++) {
-      buf.append("0");
-    }
-    buf.append(str);
-
-    return (buf.toString());
-  }
-
   public int getAccumulator() { return accumulator; }
   public void setAccumulator(int value) { accumulator = value; }
   public int getIndexRegisterX() { return indexRegisterX; }
@@ -1671,7 +1580,11 @@ public class Cpu6502 extends BaseChip {
   public int getIndexRegisterY() { return indexRegisterY; }
   public void setIndexRegisterY(int value) { indexRegisterY = value; }
   public int getStackPointer() { return stackPointer; }
+  public void setStackPointer(int value) { stackPointer = value; }
   public int getProgramCounter() { return programCounter; }
+  public void setProgramCounter(int value) { programCounter = value; }
+  public int getProcessorStatus() { packPSR(); return processorStatusRegister; }
+  public void setProcessorStatus(int value) { processorStatusRegister = value; unpackPSR(); }
   public int getInstructionRegister() { return instructionRegister; }
   public boolean getCarryFlag() { return carryFlag; }
   public void setCarryFlag(boolean value) { carryFlag = value; }
@@ -1682,14 +1595,12 @@ public class Cpu6502 extends BaseChip {
   public boolean getOverflowFlag() { return overflowFlag; }
   public void setOverflowFlag(boolean value) { overflowFlag = value; }
   public boolean getDecimalModeFlag() { return decimalModeFlag; }
+  public void setDecimalModeFlag(boolean value) { decimalModeFlag = value; }
   public boolean getInterruptDisableFlag() { return interruptDisableFlag; }
-  
-  /**
-   * Sets the debug mode on or off depending on the parameter.
-   *
-   * @param debug debug on if true, otherwise off.
-   */
-  public void setDebug(boolean debug) {
-    this.debug = debug;
-  }
+  public void setInterruptDisableFlag(boolean value) { interruptDisableFlag = value; }
+  public void stackPush(int value) { mem[stackPointer + 0x100] = value; stackPointer = ((stackPointer - 1) & 0xFF); }
+  public int stackPeek() { return mem[0x100 + stackPointer + 1]; }
+  public int stackPop() { stackPointer = ((stackPointer + 1) & 0xFF); return mem[stackPointer + 0x100]; }
+  public boolean isNmiAsserted() { return (interruptStatus & S_NMI) != 0; }
+  public boolean isIrqAsserted() { return (interruptStatus & S_IRQ) != 0; }
 }
