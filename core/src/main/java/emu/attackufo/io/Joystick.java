@@ -72,7 +72,7 @@ public class Joystick {
 
         // Initialise the key to joystick signal HashMap.
         for (int i = 0; i < keyToJoystickData.length; i++) {
-            keyToJoystickMap.put(new Integer(keyToJoystickData[i][0]), keyToJoystickData[i][1]);
+            keyToJoystickMap.put(keyToJoystickData[i][0], keyToJoystickData[i][1]);
         }
     }
 
