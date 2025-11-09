@@ -544,7 +544,7 @@ public class Vic extends MemoryMappedChip {
             mem[address] = value;
             auxiliaryColour = vicColours[(value & 0xF0) >> 4];
             multiColourTable[3] = auxiliaryColour;
-            masterVolume = (15 - (value & 0x0F));
+            masterVolume = (value & 0x0F);
             break;
 
         case VIC_REG_15: // $900F Screen and Border Colours, Reverse Video
